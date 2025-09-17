@@ -1,35 +1,18 @@
 from __future__ import annotations
 import logging
 import threading
+import asyncio  # needed for sleeping on RetryAfter
 
 # Move dotenv to config.py (preferred). If not, uncomment next two lines and place BEFORE config imports:
 # from dotenv import load_dotenv
 # load_dotenv()
 
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    ApplicationBuilder,
-    AIORateLimiter,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import RetryAfter
 
-from .config import TELEGRAM_BOT_TOKEN, WEB_HOST, WEB_PORT, GOOGLE_OAUTH_MODE  # single import line
+from .config import TELEGRAM_BOT_TOKEN, WEB_HOST, WEB_PORT, GOOGLE_OAUTH_MODE
 from .db import init_db
-from .handlers import (
-    start,
-    help_cmd,
-    login,
-    logout,
-    me,
-    setfolder_cmd,
-    handle_document,
-    handle_text,
-    queue_cmd,
-)
+from .handlers import start, help_cmd, login, logout, me, setfolder_cmd, handle_document, handle_text, queue_cmd
 from .config import EDIT_THROTTLE_SECS
 
 logging.basicConfig(
@@ -42,10 +25,9 @@ log.info("EDIT_THROTTLE_SECS = %s", EDIT_THROTTLE_SECS)
 
 # ---------- error handler ----------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    import traceback
     err = context.error
     if isinstance(err, RetryAfter):
-        # Respect Telegram’s backoff, avoid crashing
+        # Respect Telegram’s backoff; prevents crashes on flood-wait
         await asyncio.sleep(err.retry_after + 1)
         return
 
@@ -73,13 +55,8 @@ def main():
         th = threading.Thread(target=run_web, daemon=True)
         th.start()
 
-    # Enable AIORateLimiter to respect flood control automatically
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .rate_limiter(AIORateLimiter())
-        .build()
-    )
+    # No AIORateLimiter here (no extra install required)
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
