@@ -10,7 +10,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8080/oauth/callback")
-EDIT_THROTTLE_SECS = float(os.getenv("EDIT_THROTTLE_SECS", "1.0"))
+EDIT_THROTTLE_SECS = float(os.getenv("EDIT_THROTTLE_SECS", "5.0"))
 # Optional
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8080")  # public URL where FastAPI is served
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
@@ -24,7 +24,7 @@ WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 # Progress & uploads
 CHUNK_SIZE = 10 * 1024 * 1024        # 10 MB Google Drive resumable chunk
 DL_CHUNK = 1 * 1024 * 1024           # 1 MB for HTTP download
-EDIT_THROTTLE_SECS = 1.0             # Telegram message edit throttle
+EDIT_THROTTLE_SECS = 5.0             # Telegram message edit throttle
 
 # Create dirs
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
