@@ -23,8 +23,7 @@ WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 
 # Progress & uploads
 CHUNK_SIZE = 10 * 1024 * 1024        # 10 MB Google Drive resumable chunk
-DL_CHUNK = 1 * 1024 * 1024           # 1 MB for HTTP download
-EDIT_THROTTLE_SECS = 5.0             # Telegram message edit throttle
+DL_CHUNK = 1 * 1024 * 1024           # 1 MB for HTTP download      
 
 # Create dirs
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
