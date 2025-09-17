@@ -226,9 +226,11 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         creds_json = creds_from_token_response(tok)
         email = email_from_id_token(tok.get("id_token"))
         save_creds(uid, email, creds_json)
-        await status.edit_text(f"✅ Connected as {email}. You can now send files or links.")
+        # CHANGED: use safe_edit instead of direct edit_text
+        await safe_edit(status, f"✅ Connected as {email}. You can now send files or links.")
     except Exception as e:
-        await status.edit_text(f"❌ Login failed: {e}")
+        # CHANGED: use safe_edit instead of direct edit_text
+        await safe_edit(status, f"❌ Login failed: {html.escape(str(e))}")
 
 
 async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
