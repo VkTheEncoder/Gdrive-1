@@ -6,23 +6,49 @@ import threading
 # from dotenv import load_dotenv
 # load_dotenv()
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes  # added ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ApplicationBuilder,
+    AIORateLimiter,
+)
+from telegram.error import RetryAfter
 
 from .config import TELEGRAM_BOT_TOKEN, WEB_HOST, WEB_PORT, GOOGLE_OAUTH_MODE  # single import line
 from .db import init_db
-from .handlers import start, help_cmd, login, logout, me, setfolder_cmd, handle_document, handle_text, queue_cmd
+from .handlers import (
+    start,
+    help_cmd,
+    login,
+    logout,
+    me,
+    setfolder_cmd,
+    handle_document,
+    handle_text,
+    queue_cmd,
+)
 from .config import EDIT_THROTTLE_SECS
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO,   # was INFO
+    level=logging.INFO,
 )
 log = logging.getLogger("gdrive_bot")
 log.info("EDIT_THROTTLE_SECS = %s", EDIT_THROTTLE_SECS)
 
 
+# ---------- error handler ----------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import traceback
+    err = context.error
+    if isinstance(err, RetryAfter):
+        # Respect Telegram’s backoff, avoid crashing
+        await asyncio.sleep(err.retry_after + 1)
+        return
+
     logging.exception("Unhandled error while processing update: %s", update)
     try:
         if hasattr(update, "effective_message") and update.effective_message:
@@ -30,9 +56,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
+
 def run_web():
     import uvicorn
     uvicorn.run("app.web:app", host=WEB_HOST, port=WEB_PORT, log_level="info", reload=False)
+
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -45,7 +73,13 @@ def main():
         th = threading.Thread(target=run_web, daemon=True)
         th.start()
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Enable AIORateLimiter to respect flood control automatically
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .rate_limiter(AIORateLimiter())
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -61,6 +95,7 @@ def main():
 
     log.info("Bot started. Web server mode: %s | %s:%s", GOOGLE_OAUTH_MODE, WEB_HOST, WEB_PORT)
     app.run_polling(close_loop=False)
+
 
 if __name__ == "__main__":
     main()
