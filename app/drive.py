@@ -159,12 +159,14 @@ def upload_with_progress(service, user_id: int, file_path: str, file_name: str, 
         file_name = os.path.basename(file_path)
     
     # Ensure extension exists (important for Drive preview)
-    if "." not in file_name:
-        file_name += ".mp4"  # default fallback if missing extension
-    
-    meta = {"name": file_name}
-    if folder:
-        meta["parents"] = [folder]
+    if "." not in file_name and mime:
+        ext = mimetypes.guess_extension(mime.split(";")[0].strip())
+        if ext:
+            file_name += ext
+        
+        meta = {"name": file_name}
+        if folder:
+            meta["parents"] = [folder]
     
     # --- Fix MIME type ---
     if not mime:
