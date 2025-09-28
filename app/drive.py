@@ -14,6 +14,7 @@ import asyncio
 from .config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, OAUTH_REDIRECT_URI, CHUNK_SIZE
 from .db import save_creds, load_creds, get_folder, set_folder
 from .utils import card_progress
+import os, mimetypes
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file", "openid", "email", "profile"]
 
@@ -152,11 +153,25 @@ def upload_with_progress(service, user_id: int, file_path: str, file_name: str, 
     """
     # Use parent folder if the user set one
     folder = get_folder(user_id)
+    # --- Fix filename ---
+    # If caller passed a generic name, try to recover from local path
+    if not file_name or file_name.lower() == "file":
+        file_name = os.path.basename(file_path)
+    
+    # Ensure extension exists (important for Drive preview)
+    if "." not in file_name:
+        file_name += ".mp4"  # default fallback if missing extension
+    
     meta = {"name": file_name}
     if folder:
         meta["parents"] = [folder]
-
-    # 5MB chunks = smooth progress, good throughput
+    
+    # --- Fix MIME type ---
+    if not mime:
+        mime, _ = mimetypes.guess_type(file_name)
+    if not mime:
+        mime = "application/octet-stream"
+    
     media = MediaFileUpload(file_path, mimetype=mime, resumable=True, chunksize=5 * 1024 * 1024)
 
     # Ask Drive to return links & size right away
