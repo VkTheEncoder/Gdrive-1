@@ -169,8 +169,14 @@ async def download_http(
                     break
 
     # Decide filename
-    name = name_hint or pick_name_from_headers(cur_url, {})
+    # Decide filename using real response headers
+    if not name_hint:
+        name = pick_name_from_headers(str(r.url), r.headers)
+    else:
+        name = name_hint
+    
     dest = dest_dir / name
+
     part = dest.with_suffix(dest.suffix + ".part")
 
     # Progress state
