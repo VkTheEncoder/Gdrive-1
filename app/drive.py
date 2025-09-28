@@ -151,29 +151,35 @@ def upload_with_progress(service, user_id: int, file_path: str, file_name: str, 
     Uploads to Drive with resumable chunks and progress updates.
     Returns: (link, info_dict) where link is webContentLink or webViewLink.
     """
+    import os, mimetypes, time
+    from googleapiclient.http import MediaFileUpload
+    from .db import get_folder
+    from .utils import card_progress
+
     # Use parent folder if the user set one
     folder = get_folder(user_id)
+
     # --- Fix filename ---
-    # If caller passed a generic name, try to recover from local path
-    if not file_name or file_name.lower() == "file":
-        file_name = os.path.basename(file_path)
-    
-    # Ensure extension exists (important for Drive preview)
+    if not file_name or file_name.lower() in {"file", "unknown"}:
+        file_name = os.path.basename(file_path) or "download"
+
+    # Add extension if missing and we know MIME
     if "." not in file_name and mime:
         ext = mimetypes.guess_extension(mime.split(";")[0].strip())
         if ext:
             file_name += ext
-        
-        meta = {"name": file_name}
-        if folder:
-            meta["parents"] = [folder]
-    
+
+    # Prepare metadata
+    meta = {"name": file_name}
+    if folder:
+        meta["parents"] = [folder]
+
     # --- Fix MIME type ---
     if not mime:
         mime, _ = mimetypes.guess_type(file_name)
     if not mime:
         mime = "application/octet-stream"
-    
+
     media = MediaFileUpload(file_path, mimetype=mime, resumable=True, chunksize=5 * 1024 * 1024)
 
     # Ask Drive to return links & size right away
