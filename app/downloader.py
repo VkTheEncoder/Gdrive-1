@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import time
+import socket  # <--- Added for IPv4 fix
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import unquote, urlparse, urljoin   
@@ -12,7 +13,7 @@ from telegram import Bot
 from telegram.constants import FileDownloadOutOfRange
 from .utils import card_progress
 from .config import DOWNLOAD_DIR, DL_CHUNK
-import html as _html  # for unescaping &amp; etc
+import html as _html
 from aiohttp import ClientPayloadError, ClientConnectorError, ClientResponseError
 
 _FILE_RE = re.compile(r'filename\*?=([^;]+)', re.I)
@@ -20,23 +21,12 @@ _FILE_RE = re.compile(r'filename\*?=([^;]+)', re.I)
 _HTML_URL_RE = re.compile(r'https?://[^\s"\'<>]+', re.I)
 
 def _sanitize_candidate(u: str) -> str:
-    # trim junk some pages append outside quotes, e.g. css url(...) ending ')'
     return u.strip().rstrip(')]>;,.')
 
 def _extract_direct_link_from_html(base_url: str, html_text: str) -> Optional[str]:
-    """
-    Pull a real file/redirect URL out of an HTML landing page.
-    Handles:
-      - <meta http-equiv=refresh ... content="...;url=...">
-      - JS redirects: window.location[.href]=..., location.replace(...), setTimeout(...)
-      - CSS/JS url('...') constructs
-      - <a href="..."> with download-ish text or file extensions
-      - Generic candidates that look like direct endpoints
-    """
     def U(s: str) -> str:
         return _html.unescape(s.strip())
 
-    # 1) META REFRESH (attribute order varies on Blogspot)
     meta_pat = re.compile(
         r'<meta[^>]*?(?:http-equiv\s*=\s*["\']?refresh["\']?[^>]*?content\s*=\s*["\']([^"\']+)["\']'
         r'|content\s*=\s*["\']([^"\']+)["\'][^>]*?http-equiv\s*=\s*["\']?refresh["\']?)[^>]*?>',
@@ -49,7 +39,6 @@ def _extract_direct_link_from_html(base_url: str, html_text: str) -> Optional[st
         if m2:
             return urljoin(base_url, _sanitize_candidate(U(m2.group(1))))
 
-    # 2) JS redirects
     for pat in [
         r'window\.location(?:\.href)?\s*=\s*[\'"]([^\'"]+)[\'"]',
         r'location\.replace\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
@@ -59,13 +48,11 @@ def _extract_direct_link_from_html(base_url: str, html_text: str) -> Optional[st
         if m:
             return urljoin(base_url, _sanitize_candidate(U(m.group(1))))
 
-    # 3) CSS url(...) patterns (avoid grabbing the trailing ')')
     css_pat = re.compile(r'url\(\s*([\'"]?)(https?://[^)\'"]+)\1\s*\)', re.I)
     m = css_pat.search(html_text)
     if m:
         return urljoin(base_url, _sanitize_candidate(U(m.group(2))))
 
-    # 4) <a href="..."> anchors — prefer obvious downloads
     a_pat = re.compile(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
     for href, text in a_pat.findall(html_text):
         txt = re.sub(r'\s+', ' ', text).strip().lower()
@@ -75,14 +62,11 @@ def _extract_direct_link_from_html(base_url: str, html_text: str) -> Optional[st
         if re.search(r'\.(mp4|mkv|webm|mov|mp3|flac|wav|zip|rar|7z|pdf|srt|ass)(\?|#|$)', href_u, re.I):
             return urljoin(base_url, href_u)
 
-    # 5) Generic candidates seen on page (avoid random googleusercontent *images*)
     candidates = []
     for u in _HTML_URL_RE.findall(html_text):
         u = _sanitize_candidate(U(u))
-        # skip obvious theme/image assets
         if re.search(r'(blogger|themes)\.googleusercontent\.com', u):
             continue
-        # prefer endpoints that smell like file downloads
         if any(x in u for x in [
             "googlevideo.com", "uc?export=download",
             "/download", "/get", "/api/dl", "/file/", "/dl?", "/d/"
@@ -107,7 +91,6 @@ def pick_name_from_headers(url: str, headers: dict) -> str:
             v = m.group(1).strip().strip('"').strip("'")
             v = v.split("UTF-8''")[-1]
             return sanitize_filename(v)
-    # Fallback to URL path
     path = urlparse(url).path
     name = os.path.basename(path) or "file"
     return sanitize_filename(name)
@@ -115,25 +98,18 @@ def pick_name_from_headers(url: str, headers: dict) -> str:
 async def download_http(
     url: str, dest_dir: Path, status_updater: Callable[[str], None]
 ) -> tuple[Path, Optional[str], int]:
-    """
-    Robust HTTP downloader with:
-    - HTML landing page handling (extracts real file URL)
-    - Resume via Range when connection drops or server lies about Content-Length
-    Returns: (dest_path, mime, total_bytes)
-    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    # Use the original URL as Referer for all hops/requests
     base_referer = url
-    # --- Follow up to 3 HTML landing pages to a direct file URL ---
     max_html_hops = 5
     cur_url = url
     mime_hint = None
     total_declared = 0
     name_hint = None
 
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as sess:
+    # --- FIX 1: Force IPv4 for the initial probe session ---
+    conn_probe = aiohttp.TCPConnector(family=socket.AF_INET)
+    async with aiohttp.ClientSession(connector=conn_probe, headers={"User-Agent": "Mozilla/5.0"}) as sess:
         for _ in range(max_html_hops + 1):
-            # HEAD first (optional hint)
             try:
                 async with sess.head(cur_url, allow_redirects=True) as hr:
                     if hr.status // 100 == 2:
@@ -144,7 +120,6 @@ async def download_http(
             except Exception:
                 pass
 
-            # GET once to see if it's HTML or a file
             async with sess.get(
                 cur_url,
                 allow_redirects=True,
@@ -152,34 +127,24 @@ async def download_http(
             ) as r:
                 ct = (r.headers.get("Content-Type") or "").lower()
                 if ct.startswith("text/html") and (r.status // 100 == 2):
-                    # This is an HTML page. Read it and try to extract the real file URL.
                     txt = await r.text(errors="ignore")
                     nxt = _extract_direct_link_from_html(str(r.url), txt)
                     if nxt and nxt != cur_url:
                         cur_url = nxt
-                        continue  # try again (next hop)
-                    # No direct link found; bail out with a friendly message.
+                        continue
                     raise RuntimeError(
                         "This URL opens a web page, not a direct file. "
-                        "Open it in a browser and copy the final download link (it should end with the file)."
+                        "Open it in a browser and copy the final download link."
                     )
                 else:
-                    # We got a file response (or at least not HTML) — proceed to real download with this URL.
-                    # Let the streaming/resume logic below handle it; we won't reuse this response.
+                    if not name_hint:
+                        name_hint = pick_name_from_headers(str(r.url), r.headers)
                     break
 
-    # Decide filename
-    # Decide filename using real response headers
-    if not name_hint:
-        name = pick_name_from_headers(str(r.url), r.headers)
-    else:
-        name = name_hint
-    
+    name = name_hint or "file"
     dest = dest_dir / name
-
     part = dest.with_suffix(dest.suffix + ".part")
 
-    # Progress state
     start_time = time.time()
     last_t = start_time
     last_done = 0
@@ -189,7 +154,9 @@ async def download_http(
     max_retries = 5
     retries_left = max_retries
 
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as sess:
+    # --- FIX 2: Force IPv4 for the main download session ---
+    conn_dl = aiohttp.TCPConnector(family=socket.AF_INET)
+    async with aiohttp.ClientSession(connector=conn_dl, headers={"User-Agent": "Mozilla/5.0"}) as sess:
         with open(part, "ab") as f:
             while True:
                 base_headers = {"User-Agent": "Mozilla/5.0", "Referer": base_referer}
@@ -206,7 +173,6 @@ async def download_http(
                     ) as r:
                         r.raise_for_status()
 
-                        # Determine total size
                         cr = r.headers.get("Content-Range")
                         if cr and "bytes" in cr and "/" in cr:
                             try:
@@ -219,7 +185,6 @@ async def download_http(
                             except Exception:
                                 total = 0
 
-                        # If server ignored Range and sent full 200, restart clean
                         if done > 0 and r.status == 200:
                             f.seek(0); f.truncate(0)
                             done = 0
@@ -242,11 +207,9 @@ async def download_http(
                                 status_updater(card_progress("Downloading File", done, total, speed, elapsed, eta))
                                 last_t, last_done = now, done
 
-                        # Finished this response
                         if total == 0 or done >= total:
                             break
 
-                        # Server closed early — retry and fetch remainder
                         retries_left = max_retries
 
                 except (ClientPayloadError, ClientConnectorError, asyncio.TimeoutError, ConnectionResetError) as e:
@@ -268,7 +231,10 @@ async def download_telegram_file(bot: Bot, file_id: str, dest_dir: Path, status_
     base = os.path.basename(tg_file.file_path)
     name = sanitize_filename(base or "telegram_file")
     dest = dest_dir / name
-    async with aiohttp.ClientSession() as sess:
+
+    # --- FIX 3: Force IPv4 for Telegram downloads too ---
+    conn_tg = aiohttp.TCPConnector(family=socket.AF_INET)
+    async with aiohttp.ClientSession(connector=conn_tg) as sess:
         async with sess.get(file_url) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length") or 0)
