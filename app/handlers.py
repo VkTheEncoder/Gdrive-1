@@ -339,16 +339,23 @@ async def _process_and_upload(
     dest = None  # To allow cleanup in finally
 
     def updater(txt: str):
-        """Thread-safe updater."""
         if throttle.ready():
-            # Schedule the coroutine on the main loop
-            future = asyncio.run_coroutine_threadsafe(
-                safe_edit(status_msg, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True),
-                loop
-            )
-            # Wrap the concurrent.futures.Future into an asyncio.Task/Future for _drain_pending
-            t = asyncio.wrap_future(future)
-            pending_edits.append(t)
+            coro = safe_edit(status_msg, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            
+            try:
+                # Check if we are currently in an event loop (Main Thread / Download Phase)
+                asyncio.get_running_loop()
+                
+                # If yes, create a task normally and track it
+                t = asyncio.create_task(coro)
+                pending_edits.append(t)
+                
+            except RuntimeError:
+                # We are in a worker thread (Upload Phase)
+                # Just send the update to the main loop safely.
+                # Do NOT try to wrap_future() or append to pending_edits here, 
+                # because that requires a loop in the current thread (which doesn't exist).
+                asyncio.run_coroutine_threadsafe(coro, loop)
 
     try:
         # 1) Download
