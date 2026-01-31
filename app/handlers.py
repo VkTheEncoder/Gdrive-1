@@ -333,9 +333,8 @@ async def _process_and_upload(
 
     status_msg = existing_status_msg or await update.message.reply_text("Preparing…")
     throttle = Throttle(EDIT_THROTTLE_SECS)
-
-    # keep track of every async progress edit task
     pending_edits: list[asyncio.Task] = []
+    dest = None # Initialize dest so finally block can see it
 
     def updater(txt: str):
         if throttle.ready():
@@ -344,70 +343,76 @@ async def _process_and_upload(
             )
             pending_edits.append(t)
 
-    # 1) Download
     try:
-        dl_start = time.time()
-        if from_telegram and file_id:
-            dest, mime, total = await download_telegram_file(
-                context.bot, file_id, Path(DOWNLOAD_DIR), updater
-            )
-        else:
-            dest, mime, total = await download_http(src, Path(DOWNLOAD_DIR), updater)
-        dl_elapsed = time.time() - dl_start
+        # 1) Download
+        try:
+            dl_start = time.time()
+            if from_telegram and file_id:
+                dest, mime, total = await download_telegram_file(
+                    context.bot, file_id, Path(DOWNLOAD_DIR), updater
+                )
+            else:
+                dest, mime, total = await download_http(src, Path(DOWNLOAD_DIR), updater)
+            dl_elapsed = time.time() - dl_start
 
-        size_bytes = dest.stat().st_size
-        # drain any straggler progress edits before the final card
-        await _drain_pending(pending_edits)
-        await safe_edit(
-            status_msg,
-            card_done("Download complete", file_name=dest.name, size=size_bytes, dl_time=dl_elapsed),
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        log.exception("Download failed")
-        await _drain_pending(pending_edits)
-        await safe_edit(status_msg, f"❌ Download failed: {html.escape(str(e))}")
-        return
-
-    # 2) Upload
-    try:
-        ul_start = time.time()
-        service, _ = get_service_for_user(uid)
-        if not service:
+            size_bytes = dest.stat().st_size
             await _drain_pending(pending_edits)
-            await safe_edit(status_msg, "Please /login first to connect your Google Drive.")
+            await safe_edit(
+                status_msg,
+                card_done("Download complete", file_name=dest.name, size=size_bytes, dl_time=dl_elapsed),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.exception("Download failed")
+            await _drain_pending(pending_edits)
+            await safe_edit(status_msg, f"❌ Download failed: {html.escape(str(e))}")
             return
-        if not mime:
-            mime, _ = mimetypes.guess_type(dest.name)
 
-        # initial upload card
-        updater(card_progress("Uploading File", 0, size_bytes, 0.0, 0.0, -1))
+        # 2) Upload
+        try:
+            ul_start = time.time()
+            service, _ = get_service_for_user(uid)
+            if not service:
+                await _drain_pending(pending_edits)
+                await safe_edit(status_msg, "Please /login first to connect your Google Drive.")
+                return
+            if not mime:
+                mime, _ = mimetypes.guess_type(dest.name)
 
-        link, info = upload_with_progress(service, uid, str(dest), dest.name, mime, updater)
-        ul_elapsed = time.time() - ul_start
+            updater(card_progress("Uploading File", 0, size_bytes, 0.0, 0.0, -1))
 
-        size_final = int(info.get("size") or size_bytes)
+            link, info = upload_with_progress(service, uid, str(dest), dest.name, mime, updater)
+            ul_elapsed = time.time() - ul_start
 
-        # drain pending edits so nothing overwrites the final card
-        await _drain_pending(pending_edits)
-        await safe_edit(
-            status_msg,
-            card_done(
-                "Upload complete",
-                file_name=dest.name,
-                size=size_final,
-                dl_time=dl_elapsed,
-                ul_time=ul_elapsed,
-                link=link,
-            ),
-            disable_web_page_preview=False,
-        )
-    except Exception as e:
-        log.exception("Upload failed")
-        await _drain_pending(pending_edits)
-        await safe_edit(status_msg, f"❌ Upload failed: {html.escape(str(e))}")
-        return
+            size_final = int(info.get("size") or size_bytes)
 
+            await _drain_pending(pending_edits)
+            await safe_edit(
+                status_msg,
+                card_done(
+                    "Upload complete",
+                    file_name=dest.name,
+                    size=size_final,
+                    dl_time=dl_elapsed,
+                    ul_time=ul_elapsed,
+                    link=link,
+                ),
+                disable_web_page_preview=False,
+            )
+        except Exception as e:
+            log.exception("Upload failed")
+            await _drain_pending(pending_edits)
+            await safe_edit(status_msg, f"❌ Upload failed: {html.escape(str(e))}")
+            return
+            
+    finally:
+        # 3) Cleanup: Delete file from VPS storage
+        if dest and os.path.exists(dest):
+            try:
+                os.remove(dest)
+                log.info(f"Successfully deleted local file: {dest}")
+            except Exception as cleanup_err:
+                log.error(f"Failed to delete {dest}: {cleanup_err}")
 
 # ---------- update handlers ----------
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
