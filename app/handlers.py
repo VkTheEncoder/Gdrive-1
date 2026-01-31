@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import re
 import time
+import os  # Added for cleanup
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -50,7 +51,7 @@ class Job:
     src: str
     from_telegram: bool
     file_id: Optional[str]
-    ticket_msg: Message  # the message we keep editing
+    ticket_msg: Message
 
 _job_queue: asyncio.Queue[Job] = asyncio.Queue()
 _worker_task: Optional[asyncio.Task] = None
@@ -226,10 +227,8 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         creds_json = creds_from_token_response(tok)
         email = email_from_id_token(tok.get("id_token"))
         save_creds(uid, email, creds_json)
-        # CHANGED: use safe_edit instead of direct edit_text
         await safe_edit(status, f"✅ Connected as {email}. You can now send files or links.")
     except Exception as e:
-        # CHANGED: use safe_edit instead of direct edit_text
         await safe_edit(status, f"❌ Login failed: {html.escape(str(e))}")
 
 
@@ -333,14 +332,22 @@ async def _process_and_upload(
 
     status_msg = existing_status_msg or await update.message.reply_text("Preparing…")
     throttle = Throttle(EDIT_THROTTLE_SECS)
+
+    # We need the loop to schedule updates from the worker thread
+    loop = asyncio.get_running_loop()
     pending_edits: list[asyncio.Task] = []
-    dest = None # Initialize dest so finally block can see it
+    dest = None  # To allow cleanup in finally
 
     def updater(txt: str):
+        """Thread-safe updater."""
         if throttle.ready():
-            t = asyncio.create_task(
-                safe_edit(status_msg, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            # Schedule the coroutine on the main loop
+            future = asyncio.run_coroutine_threadsafe(
+                safe_edit(status_msg, txt, parse_mode=ParseMode.HTML, disable_web_page_preview=True),
+                loop
             )
+            # Wrap the concurrent.futures.Future into an asyncio.Task/Future for _drain_pending
+            t = asyncio.wrap_future(future)
             pending_edits.append(t)
 
     try:
@@ -368,7 +375,7 @@ async def _process_and_upload(
             await safe_edit(status_msg, f"❌ Download failed: {html.escape(str(e))}")
             return
 
-        # 2) Upload
+        # 2) Upload (Run in a separate thread so it doesn't block the loop!)
         try:
             ul_start = time.time()
             service, _ = get_service_for_user(uid)
@@ -379,11 +386,16 @@ async def _process_and_upload(
             if not mime:
                 mime, _ = mimetypes.guess_type(dest.name)
 
+            # Initial card
             updater(card_progress("Uploading File", 0, size_bytes, 0.0, 0.0, -1))
 
-            link, info = upload_with_progress(service, uid, str(dest), dest.name, mime, updater)
-            ul_elapsed = time.time() - ul_start
+            # --- KEY FIX: Run blocking upload in a thread ---
+            link, info = await asyncio.to_thread(
+                upload_with_progress, service, uid, str(dest), dest.name, mime, updater
+            )
+            # ------------------------------------------------
 
+            ul_elapsed = time.time() - ul_start
             size_final = int(info.get("size") or size_bytes)
 
             await _drain_pending(pending_edits)
@@ -404,15 +416,16 @@ async def _process_and_upload(
             await _drain_pending(pending_edits)
             await safe_edit(status_msg, f"❌ Upload failed: {html.escape(str(e))}")
             return
-            
+
     finally:
-        # 3) Cleanup: Delete file from VPS storage
+        # 3) Cleanup: Delete file from VPS
         if dest and os.path.exists(dest):
             try:
                 os.remove(dest)
-                log.info(f"Successfully deleted local file: {dest}")
-            except Exception as cleanup_err:
-                log.error(f"Failed to delete {dest}: {cleanup_err}")
+                log.info(f"Deleted {dest} from server.")
+            except Exception as e:
+                log.error(f"Failed to delete {dest}: {e}")
+
 
 # ---------- update handlers ----------
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
